@@ -27,7 +27,7 @@ def parse_json(text: str) -> dict:
 
 
 class LLM:
-    def __init__(self, model: str | None = None, max_tokens: int = 4096,
+    def __init__(self, model: str | None = None, max_tokens: int = 8192,
                  use_cache: bool = True, usage_log: Path | None = None):
         self.model = model or config.MODEL_DEV
         self.max_tokens = max_tokens
@@ -57,6 +57,9 @@ class LLM:
         except TypeError:                      # newer SDK/model: setting not accepted
             msg = self._client.messages.create(**kwargs)
             self.temperature_set = False
+        if getattr(msg, "stop_reason", None) == "max_tokens":
+            raise LLMError(f"Claude reply was cut off at max_tokens={self.max_tokens}; "
+                           "raise max_tokens or shorten the request")
         text = "".join(b.text for b in msg.content if b.type == "text")
         return text, msg.usage.input_tokens, msg.usage.output_tokens
 
@@ -64,7 +67,7 @@ class LLM:
         for i in range(attempts):
             try:
                 return self._call_api(system, user)
-            except MissingInputError:
+            except (MissingInputError, LLMError):
                 raise
             except Exception as e:                       # SDK errors differ between versions
                 status = getattr(e, "status_code", None)
@@ -78,31 +81,35 @@ class LLM:
                 time.sleep(2 ** (i + 1))
 
     # -- public ------------------------------------------------------------
-    def complete_json(self, system: str, user: str, tag: str = "") -> dict:
+    def complete_json(self, system: str, user: str, tag: str = "", json_attempts: int = 2) -> dict:
+        """Ask for a JSON reply. An invalid reply is dropped from the cache and asked for once more."""
         key = self._key(system, user)
         cache_file = config.CACHE_DIR / "llm" / f"{key}.json"
-        t0 = time.time()
-        cached = False
-        if self.use_cache and cache_file.exists():
-            rec = json.loads(cache_file.read_text())
-            text, tin, tout = rec["text"], rec["in"], rec["out"]
-            cached = True
-        else:
-            text, tin, tout = self._call_with_retry(system, user, tag)
-            if self.use_cache:
-                cache_file.parent.mkdir(parents=True, exist_ok=True)
-                cache_file.write_text(json.dumps({"text": text, "in": tin, "out": tout}))
-        stat = {"tag": tag, "model": self.model, "tokens_in": tin, "tokens_out": tout,
-                "seconds": round(time.time() - t0, 2), "cached": cached}
-        self.calls.append(stat)
-        logger.debug("llm %s: %s in/%s out, %s s%s", tag, tin, tout, stat["seconds"],
-                     " (cached)" if cached else "")
-        self.usage_log.parent.mkdir(parents=True, exist_ok=True)
-        with self.usage_log.open("a") as f:
-            f.write(json.dumps(stat) + "\n")
-        try:
-            return parse_json(text)
-        except ValueError as e:
-            if cache_file.exists():          # do not keep a bad reply in the cache
-                cache_file.unlink()
-            raise LLMError(f"Claude reply for '{tag}' was not valid JSON: {e}") from e
+        for attempt in range(1, json_attempts + 1):
+            t0 = time.time()
+            cached = False
+            if self.use_cache and cache_file.exists():
+                rec = json.loads(cache_file.read_text())
+                text, tin, tout = rec["text"], rec["in"], rec["out"]
+                cached = True
+            else:
+                text, tin, tout = self._call_with_retry(system, user, tag)
+                if self.use_cache:
+                    cache_file.parent.mkdir(parents=True, exist_ok=True)
+                    cache_file.write_text(json.dumps({"text": text, "in": tin, "out": tout}))
+            stat = {"tag": tag, "model": self.model, "tokens_in": tin, "tokens_out": tout,
+                    "seconds": round(time.time() - t0, 2), "cached": cached}
+            self.calls.append(stat)
+            logger.debug("llm %s: %s in/%s out, %s s%s", tag, tin, tout, stat["seconds"],
+                         " (cached)" if cached else "")
+            self.usage_log.parent.mkdir(parents=True, exist_ok=True)
+            with self.usage_log.open("a") as f:
+                f.write(json.dumps(stat) + "\n")
+            try:
+                return parse_json(text)
+            except ValueError as e:
+                if cache_file.exists():          # do not keep a bad reply in the cache
+                    cache_file.unlink()
+                if attempt == json_attempts:
+                    raise LLMError(f"Claude reply for '{tag}' was not valid JSON: {e}") from e
+                logger.warning("LLM reply for '%s' was not valid JSON (%s), asking again", tag, e)
