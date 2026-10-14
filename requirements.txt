@@ -1,0 +1,9 @@
+anthropic>=0.40
+python-dotenv>=1.0
+faster-whisper>=1.0        # Whisper "small" model, runs on Mac CPU
+pdfplumber>=0.11
+pytesseract>=0.3           # needs: brew install tesseract
+numpy>=1.26
+scikit-learn>=1.4
+jiwer>=3.0
+pytest>=8.0

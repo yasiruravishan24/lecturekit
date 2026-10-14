@@ -1,0 +1,9 @@
+.env
+data/*/media.*
+.cache/
+__pycache__/
+*.pyc
+.venv/
+logs/
+storage/
+results/rating/KEY_DO_NOT_SHARE.json
