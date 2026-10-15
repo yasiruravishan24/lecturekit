@@ -7,3 +7,6 @@ __pycache__/
 logs/
 storage/
 results/rating/KEY_DO_NOT_SHARE.json
+data/*
+testing_result/*
+testing_result/results/rating/KEY_DO_NOT_SHARE.json

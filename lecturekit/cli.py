@@ -5,7 +5,7 @@ import sys
 from pathlib import Path
 
 from . import config, evaluate, log, pipeline, rating, report
-from .errors import LectureKitError
+from .errors import LectureKitError, MissingInputError
 from .llm import LLM
 
 logger = log.get("cli")
@@ -65,6 +65,9 @@ def main(argv=None) -> int:
 
     p = sub.add_parser("pack", help="make blind rating packs")
     p.add_argument("lectures", nargs="+")
+    p.add_argument("--rated-questions", type=int, default=4, help="questions per set shown to raters (default 4)")
+
+    sub.add_parser("env-info", help="write environment.md (hardware, OS, tools, packages) to the results folder")
 
     p = sub.add_parser("report", help="build the result tables")
     p.add_argument("lectures", nargs="+")
@@ -140,22 +143,45 @@ def _dispatch(a) -> None:
             print(f"{a.lecture} {c}: {len(r['quiz'])} questions, {s['total_seconds']} s, "
                   f"ratio {s['ratio']}, tokens {s['tokens_in']}/{s['tokens_out']}")
     elif a.cmd == "eval":
-        out = {"wer": evaluate.wer_lecture(d), "filter": evaluate.filter_prf(d)}
-        excl = evaluate.filter_prf_without_licence(d)
-        if excl:
-            out["filter_without_licence"] = excl
+        if not d.is_dir():
+            raise MissingInputError(f"lecture folder not found: {d}")
+        out, missing = {}, []
+        if (d / "ref_transcript.txt").exists():
+            out["wer"] = evaluate.wer_lecture(d)
+            out["wer_top_errors"] = evaluate.wer_top_errors(d)
+        else:
+            missing.append("ref_transcript.txt (WER)")
+        if (d / "off_topic_spans.json").exists() and (d / "out" / "C.json").exists():
+            out["filter"] = evaluate.filter_prf(d)
+            excl = evaluate.filter_prf_without_licence(d)
+            if excl:
+                out["filter_without_licence"] = excl
+        else:
+            missing.append("off_topic_spans.json and out/C.json (filter scores)")
+        corr = evaluate.slide_corrections(d)
+        if corr:
+            out["slide_corrections"] = {k: [list(c) for c in v] for k, v in corr.items()}
         print(json.dumps(out, indent=1))
         if (d / "ref_slides.txt").exists():
             print("slide accuracy (order-sensitive):", round(evaluate.slide_accuracy(d), 3))
             print("slide words (order-independent):",
                   {k: round(v, 3) for k, v in evaluate.slide_word_scores(d).items()})
+        else:
+            missing.append("ref_slides.txt (slide accuracy)")
+        if missing:
+            print("NOT COMPUTED, missing:", "; ".join(missing))
+    elif a.cmd == "env-info":
+        _env_info()
     elif a.cmd == "pack":
-        rating.make_packs(config.DATA_DIR, a.lectures, Path("results/rating"))
-        print("Written to results/rating (give raters rating_pack.md and the four CSVs; keep the KEY file)")
+        rating.make_packs(config.DATA_DIR, a.lectures, config.RESULTS_DIR / "rating", rated_questions=a.rated_questions)
+        print(f"Written to {config.RESULTS_DIR / 'rating'} (give each rater rating_pack.md and their own three CSVs; keep the KEY file)")
     elif a.cmd == "report":
-        text = report.build(config.DATA_DIR, a.lectures, Path("results/rating"))
-        Path("results").mkdir(exist_ok=True)
-        Path("results/summary.md").write_text(text)
+        text = report.build(config.DATA_DIR, a.lectures, config.RESULTS_DIR / "rating")
+        config.RESULTS_DIR.mkdir(parents=True, exist_ok=True)
+        (config.RESULTS_DIR / "summary.md").write_text(text)
+        svg = report.figure_note_ratings_svg(config.RESULTS_DIR / "rating")
+        if svg:
+            (config.RESULTS_DIR / "figure_note_ratings.svg").write_text(svg)
         print(text)
 
 
@@ -191,6 +217,39 @@ def _simulate_chunks(a) -> None:
         ref_text = " ".join(g["text"] for g in ref if (g["start"] + g["end"]) / 2 <= limit)
         hyp_text = " ".join(g["text"] for g in merged["segments"])
         print(f"WER of chunked vs whole-file transcript: {evaluate.wer(ref_text, hyp_text):.3f}")
+
+
+def _env_info() -> None:
+    """results/environment.md: hardware, OS, tools, settings and key package versions (thesis 5.2.3)."""
+    import datetime, platform, subprocess
+    from .api import check_environment
+
+    def sh(*cmd) -> str:
+        try:
+            return subprocess.run(cmd, capture_output=True, text=True, timeout=20).stdout.strip()
+        except Exception:
+            return "unavailable"
+
+    pk = [l for l in sh(sys.executable, "-m", "pip", "list").splitlines()
+          if l.split()[:1] and l.split()[0].lower() in
+          ("anthropic", "faster-whisper", "ctranslate2", "pdfplumber", "pytesseract", "numpy",
+           "scikit-learn", "jiwer", "pytest")]
+    env = check_environment()
+    mem = sh("sysctl", "-n", "hw.memsize")
+    text = "\n".join([
+        "# Environment record", "", f"Recorded: {datetime.datetime.now().astimezone():%Y-%m-%d %H:%M:%S %z}", "",
+        "## Hardware and OS", "```", sh("sw_vers") or platform.platform(),
+        f"cpu:    {sh('sysctl', '-n', 'machdep.cpu.brand_string') or platform.processor()}",
+        f"memory: {int(mem) // 1073741824} GB" if mem.isdigit() else "memory: unavailable",
+        f"arch:   {platform.machine()}", "```", "",
+        "## Tools", "```", f"python:    {platform.python_version()}",
+        f"ffmpeg:    {(sh('ffmpeg', '-version').splitlines() or ['unavailable'])[0]}",
+        f"tesseract: {(sh('tesseract', '--version').splitlines() or ['unavailable'])[0]}", "```", "",
+        "## Pipeline settings", "```json", json.dumps({k: env[k] for k in ("models", "whisper")}, indent=1), "```", "",
+        "## Key packages", "```", *pk, "```", ""])
+    config.RESULTS_DIR.mkdir(parents=True, exist_ok=True)
+    (config.RESULTS_DIR / "environment.md").write_text(text)
+    print(text)
 
 
 if __name__ == "__main__":

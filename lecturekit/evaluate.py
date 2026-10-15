@@ -26,6 +26,42 @@ def wer_details(ref: str, hyp: str) -> dict:
             "insertions": o.insertions}
 
 
+def wer_error_words(ref: str, hyp: str, top: int = 10) -> dict:
+    """Most frequent word errors: substitutions (ref -> hyp), deletions (ref words missed), insertions."""
+    import jiwer
+    from collections import Counter
+    r, h = norm(ref).split(), norm(hyp).split()
+    sub, dele, ins = Counter(), Counter(), Counter()
+    for c in jiwer.process_words(" ".join(r), " ".join(h)).alignments[0]:
+        if c.type == "substitute":
+            for i, j in zip(range(c.ref_start_idx, c.ref_end_idx), range(c.hyp_start_idx, c.hyp_end_idx)):
+                sub[(r[i], h[j])] += 1
+        elif c.type == "delete":
+            dele.update(r[c.ref_start_idx:c.ref_end_idx])
+        elif c.type == "insert":
+            ins.update(h[c.hyp_start_idx:c.hyp_end_idx])
+    return {"substitutions": [[f"{a} -> {b}", n] for (a, b), n in sub.most_common(top)],
+            "deletions": dele.most_common(top), "insertions": ins.most_common(top)}
+
+
+def wer_top_errors(ldir: Path, top: int = 10) -> dict:
+    """Top error words of the raw transcript against the reference window (needs ref_transcript.txt)."""
+    a, b = ref_window(ldir)
+    ref = re.sub(r"\[[^\]]*\]", " ", (ldir / "ref_transcript.txt").read_text())
+    raw = json.loads((ldir / "transcript.json").read_text())["segments"]
+    return wer_error_words(ref, hyp_text(raw, a, b), top)
+
+
+def slide_corrections(ldir: Path) -> dict:
+    """The (heard word, slide word) corrections applied in each configuration that has them."""
+    out = {}
+    for cfg in ("B", "C"):
+        f = ldir / "out" / f"{cfg}.json"
+        if f.exists():
+            out[cfg] = [tuple(c) for c in json.loads(f.read_text()).get("slide_corrections", [])]
+    return out
+
+
 def ref_window(ldir: Path) -> tuple[float, float]:
     m = load_meta(ldir)
     return m["ref_start"], m["ref_end"]
