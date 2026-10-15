@@ -75,16 +75,46 @@ def make_packs(data_dir: Path, lectures: list[str], out_dir: Path, seed: int = 2
             for uid in USEFUL_STATEMENTS: w.writerow([uid, ""])
 
 
+# Simplified layouts the raters used instead of the per-criterion template (CHANGELOG.md decision 6):
+# one overall score per set / per question / per usefulness statement.
+OVERALL_LAYOUTS = {("Set", "Rating"): (("Set",), "overall"),
+                   ("Set", "Question", "Rating"): (("Set", "Question"), "overall"),
+                   ("Criteria", "Rating"): (("Criteria",), "score")}
+
+
+def overall_layout(fieldnames) -> tuple | None:
+    """(id columns, criterion name) if the CSV is one of the simplified overall-score layouts, else None."""
+    return OVERALL_LAYOUTS.get(tuple(fieldnames or ()))
+
+
 def read_ratings(path: Path, key: dict | None = None) -> dict[tuple, int]:
     """Read a filled rating CSV. Raises ValidationError with the file, row and column on bad data.
 
     key: optional KEY_DO_NOT_SHARE.json content; if given, unknown set ids are rejected.
+    Also reads the simplified overall-score layouts: keys ("S01", "overall"), ("S01", "Q1", "overall"), ("U1", "score").
     """
     if not Path(path).exists():
         raise MissingInputError(f"rating file not found: {path}")
     out = {}
     with Path(path).open(newline="") as f:
         rd = csv.DictReader(f)
+        lay = overall_layout(rd.fieldnames)
+        if lay is not None:
+            id_cols, crit = lay
+            for n, row in enumerate(rd, 2):
+                if key is not None and "Set" in id_cols and row["Set"] not in key:
+                    raise ValidationError(f"{path} line {n}: unknown set {row['Set']!r}")
+                v = (row["Rating"] or "").strip()
+                if not v:
+                    continue
+                try:
+                    val = int(v)
+                except ValueError:
+                    raise ValidationError(f"{path} line {n}, column 'Rating': {v!r} is not a whole number") from None
+                if not 1 <= val <= 5:
+                    raise ValidationError(f"{path} line {n}, column 'Rating': {val} is outside 1-5")
+                out[tuple(row[c] for c in id_cols) + (crit,)] = val
+            return out
         if not rd.fieldnames or "set_id" not in rd.fieldnames:
             raise ValidationError(f"{path}: first column must be 'set_id'")
         for n, row in enumerate(rd, 2):
@@ -108,8 +138,10 @@ def completeness(path: Path, key: dict) -> dict:
     """How many cells are still empty in a rating CSV (to chase a rater)."""
     filled = len(read_ratings(path, key))
     with Path(path).open(newline="") as f:
-        rows = list(csv.DictReader(f))
-    total = sum(1 for r in rows for k in r if k not in ("set_id", "q_no"))
+        rd = csv.DictReader(f)
+        lay = overall_layout(rd.fieldnames)
+        rows = list(rd)
+    total = len(rows) if lay is not None else sum(1 for r in rows for k in r if k not in ("set_id", "q_no"))
     return {"filled": filled, "total": total, "missing": total - filled}
 
 

@@ -40,6 +40,14 @@ def outcome_questions(mean_c, share) -> str:
     return LARGELY if mean_c >= RATING_LARGELY or share >= SHARE_LARGELY else PARTIAL
 
 
+def outcome_questions_mean_only(mean_c) -> str:
+    """Objective 3 judged on the mean question rating alone. Used only when the share clear and answerable
+    cannot be computed (raters gave overall scores, CHANGELOG.md decision 6); shown next to the rule's own result."""
+    if mean_c is None:
+        return NOT_COMPUTED
+    return ACHIEVED if mean_c >= RATING_ACHIEVED else LARGELY if mean_c >= RATING_LARGELY else PARTIAL
+
+
 def outcome_evaluation(metrics_missing: int, raters_incomplete: int) -> str:
     """Objective 4: all metrics computed and both raters complete / one gap / otherwise."""
     if metrics_missing == 0 and raters_incomplete == 0:
@@ -55,6 +63,11 @@ def _delta(a, b):
     return None if a is None or b is None else round(b - a, 2)
 
 
+def _present(summary: dict, criteria: list) -> list:
+    """The criteria that actually have ratings (none when the raters gave one overall score)."""
+    return [k for k in criteria if any(k in v for v in summary.values())]
+
+
 def _rater_files(pack_dir: Path, kind: str) -> dict:
     return {r: pack_dir / f"{kind}_{r}.csv" for r in ("rater1", "rater2")}
 
@@ -65,6 +78,23 @@ def _pooled(rows: list) -> dict | None:
         return None
     p, r = tp / (tp + fp), tp / (tp + fn)
     return {"tp": tp, "fp": fp, "fn": fn, "precision": p, "recall": r, "f1": 2 * p * r / (p + r) if p + r else 0.0}
+
+
+def _shares_table(shares: dict) -> list:
+    """Table 11b lines, or a 'not computed' notice when the raters gave overall scores only."""
+    if all(v["clear_answerable_pct"] is None and v["bloom_matched_pct"] is None for v in shares.values()):
+        return ["## Table 11b - Question quality shares: NOT COMPUTED",
+                "Clear and answerable (clarity >= 4 and answerability >= 4) and Bloom-matched (Bloom alignment >= 4) need the "
+                "separate clarity, answerability and Bloom scores. The raters gave one overall score per question "
+                "(CHANGELOG.md decision 6), so these shares cannot be computed and are not estimated from the overall score.", ""]
+    out = ["## Table 11b - Question quality shares (first questions of each set, both raters)",
+           f"Clear and answerable = clarity >= {rating.CLEAR_MIN} and answerability >= {rating.CLEAR_MIN}; "
+           f"Bloom-matched = Bloom alignment >= {rating.CLEAR_MIN}. One judgement = one question rated by one rater.", "",
+           "| Config | Questions rated | Judgements | Clear and answerable | Bloom-matched |", "|---|---|---|---|---|"]
+    for c in CONFIGS:
+        v = shares[c]
+        out.append(f"| {c} | {v['questions_rated']} | {v['judgements']} | {_f(v['clear_answerable_pct'], 0, '%')} | {_f(v['bloom_matched_pct'], 0, '%')} |")
+    return out
 
 
 def build(data_dir: Path, lectures: list[str], pack_dir: Path | None = None) -> str:
@@ -147,10 +177,14 @@ def build(data_dir: Path, lectures: list[str], pack_dir: Path | None = None) -> 
             s = rating.summarise(pack_dir, files, kind)
             if kind == "notes": sn = s
             else: sq = s
-            md += [f"## Table {10 if kind == 'notes' else 11} - {kind} ratings (mean of both raters)",
-                   "| Config | " + " | ".join(crit) + " | overall |", "|---|" + "---|" * (len(crit) + 1)]
+            crit = _present(s, crit)
+            md += [f"## Table {10 if kind == 'notes' else 11} - {kind} ratings (mean of both raters)"]
+            if not crit:
+                md += [f"*The raters gave one overall score per {'set' if kind == 'notes' else 'question'}, not the "
+                       f"per-criterion scores of the template (CHANGELOG.md decision 6), so only the overall mean exists.*", ""]
+            md += ["| Config | " + " | ".join(crit + ["overall"]) + " |", "|---|" + "---|" * (len(crit) + 1)]
             for c in CONFIGS:
-                if c in s: md.append(f"| {c} | " + " | ".join(str(s[c].get(k, "")) for k in crit) + f" | {s[c]['overall']} |")
+                if c in s: md.append(f"| {c} | " + " | ".join(str(s[c].get(k, "")) for k in crit + ["overall"]) + " |")
             k, n = rating.weighted_kappa(rating.read_ratings(files["rater1"]), rating.read_ratings(files["rater2"]))
             md.append(f"\nWeighted kappa ({kind}): {_f(k)} ({rating.kappa_band(k)}), n = {n}\n")
             for r, path in files.items():
@@ -159,13 +193,9 @@ def build(data_dir: Path, lectures: list[str], pack_dir: Path | None = None) -> 
                     raters_incomplete += 1
                     md.append(f"*{r}: {comp['missing']} of {comp['total']} {kind} cells still empty.*\n")
         shares = rating.question_shares(pack_dir, _rater_files(pack_dir, "questions"))
-        md += ["## Table 11b - Question quality shares (first questions of each set, both raters)",
-               f"Clear and answerable = clarity >= {rating.CLEAR_MIN} and answerability >= {rating.CLEAR_MIN}; "
-               f"Bloom-matched = Bloom alignment >= {rating.CLEAR_MIN}. One judgement = one question rated by one rater.", "",
-               "| Config | Questions rated | Judgements | Clear and answerable | Bloom-matched |", "|---|---|---|---|---|"]
-        for c in CONFIGS:
-            v = shares[c]
-            md.append(f"| {c} | {v['questions_rated']} | {v['judgements']} | {_f(v['clear_answerable_pct'], 0, '%')} | {_f(v['bloom_matched_pct'], 0, '%')} |")
+        md += _shares_table(shares)
+        if all(v["clear_answerable_pct"] is None for v in shares.values()):
+            shares = None                           # not computable from overall scores: objective 3 must not use it
 
         use_files = {r: pack_dir / f"usefulness_{r}.csv" for r in ("rater1", "rater2")}
         if all(p.exists() for p in use_files.values()):
@@ -179,7 +209,7 @@ def build(data_dir: Path, lectures: list[str], pack_dir: Path | None = None) -> 
         # ---- effects of slide grounding (A to B) and filtering (B to C) --------------------------
         md += ["## Effects between configurations (differences of the means above)",
                "| Measure | A | B | C | A to B (slides) | B to C (filter) |", "|---|---|---|---|---|---|"]
-        for label, s, crit in (("Notes", sn, rating.NOTE_CRITERIA), ("Questions", sq, rating.Q_CRITERIA)):
+        for label, s, crit in (("Notes", sn, _present(sn, rating.NOTE_CRITERIA)), ("Questions", sq, _present(sq, rating.Q_CRITERIA))):
             for k in crit + ["overall"]:
                 v = {c: s.get(c, {}).get(k) for c in CONFIGS}
                 md.append(f"| {label}: {k} | {_f(v['A'])} | {_f(v['B'])} | {_f(v['C'])} | "
@@ -200,12 +230,20 @@ def build(data_dir: Path, lectures: list[str], pack_dir: Path | None = None) -> 
     share_c = (shares or {}).get("C", {}).get("clear_answerable_pct")
     if not have_ratings:
         metrics_missing += 3                       # note ratings, question ratings, kappa
+    # overall scores only (decision 6): the criterion-level ratings and the question shares were planned metrics, counted as one gap
+    overall_only = have_ratings and not _present(sn, rating.NOTE_CRITERIA) and not _present(sq, rating.Q_CRITERIA)
+    if overall_only:
+        metrics_missing += 1
+    obj3 = outcome_questions(mean_q_c, share_c)
+    if have_ratings and share_c is None and mean_q_c is not None:      # overall scores only (decision 6)
+        obj3 = (f"{NOT_COMPUTED} under the confirmed rule (it needs the share clear and answerable, which overall scores cannot give); "
+                f"judged on the mean alone: {outcome_questions_mean_only(mean_q_c)}")
     md += ["## Objective outcome words (fixed thresholds, TESTING.md section 11 decision 4)",
            "| Objective | Evidence | Outcome |", "|---|---|---|",
            f"| 1 Pipeline for capture and processing | all of A, B, C produced for {n_complete} of {len(lectures)} lectures | {outcome_pipeline(n_complete, len(lectures))} |",
            f"| 2 Note generation | mean note rating, configuration C: {_f(mean_notes_c)} (Achieved >= {RATING_ACHIEVED}, Largely >= {RATING_LARGELY}) | {outcome_notes(mean_notes_c)} |",
-           f"| 3 Knowledge assessment | mean question rating C: {_f(mean_q_c)}; clear and answerable: {_f(share_c, 0, '%')} (Achieved: >= {RATING_ACHIEVED} and >= {SHARE_ACHIEVED:.0f}%; Largely: mean >= {RATING_LARGELY} or share >= {SHARE_LARGELY:.0f}%) | {outcome_questions(mean_q_c, share_c)} |",
-           f"| 4 Technical and rater evaluation | metrics missing: {metrics_missing}; incomplete rater files: {raters_incomplete} | {outcome_evaluation(metrics_missing, raters_incomplete)} |",
+           f"| 3 Knowledge assessment | mean question rating C: {_f(mean_q_c)}; clear and answerable: {_f(share_c, 0, '%')} (Achieved: >= {RATING_ACHIEVED} and >= {SHARE_ACHIEVED:.0f}%; Largely: mean >= {RATING_LARGELY} or share >= {SHARE_LARGELY:.0f}%) | {obj3} |",
+           f"| 4 Technical and rater evaluation | metrics missing: {metrics_missing}{" (criterion-level ratings and question shares: raters gave overall scores only)" if overall_only else ""}; incomplete rater files: {raters_incomplete} | {outcome_evaluation(metrics_missing, raters_incomplete)} |",
            ""]
     return "\n".join(md)
 
@@ -217,13 +255,13 @@ def figure_note_ratings_svg(pack_dir: Path) -> str | None:
     s = rating.summarise(pack_dir, _rater_files(pack_dir, "notes"), "notes")
     if not s:
         return None
-    cats = rating.NOTE_CRITERIA + ["overall"]
+    cats = _present(s, rating.NOTE_CRITERIA) + ["overall"]          # only "overall" when the raters gave one score
     colours = {"A": "#3B6FB6", "B": "#E0A030", "C": "#4C9F8A"}
     W, H, L, T, B = 640, 360, 50, 30, 60
     pw, ph = W - L - 20, H - T - B
     out = [f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {W} {H}" font-family="sans-serif" font-size="12">',
            f'<rect width="{W}" height="{H}" fill="white"/>',
-           f'<text x="{W / 2}" y="18" text-anchor="middle" font-size="14">Mean note rating by criterion and configuration (1-5)</text>']
+           f'<text x="{W / 2}" y="18" text-anchor="middle" font-size="14">{"Mean note rating by configuration (overall score, 1-5)" if cats == ["overall"] else "Mean note rating by criterion and configuration (1-5)"}</text>']
     for v in range(0, 6):
         y = T + ph - ph * v / 5
         out.append(f'<line x1="{L}" y1="{y:.1f}" x2="{W - 20}" y2="{y:.1f}" stroke="#ddd"/>'

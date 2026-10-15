@@ -128,3 +128,55 @@ def test_filter_is_scored_only_inside_the_labelled_window(lecture):
     r = evaluate.filter_prf(lecture)
     assert r["segments"] == 3 and r["tp"] == 1 and r["fp"] == 0 and r["fn"] == 0
     assert all(row["id"] != 5 for row in evaluate.filter_diff(lecture))
+
+
+# ---- raters who return one overall score instead of per-criterion scores (CHANGELOG.md decision 6) ----
+
+def write_overall(out, rater, notes_val, q_val, u_val):
+    """Overwrite a rater's CSVs with the simplified layouts: Set,Rating / Set,Question,Rating / Criteria,Rating."""
+    key = json.loads((out / "KEY_DO_NOT_SHARE.json").read_text())
+    with (out / f"notes_{rater}.csv").open("w", newline="") as f:
+        w = csv.writer(f); w.writerow(["Set", "Rating"])
+        for i, sid in enumerate(key): w.writerow([sid, notes_val(i)])
+    with (out / f"questions_{rater}.csv").open("w", newline="") as f:
+        w = csv.writer(f); w.writerow(["Set", "Question", "Rating"])
+        for i, sid in enumerate(key):
+            for q in (1, 2): w.writerow([sid, f"Q{q}", q_val(i, q)])
+    with (out / f"usefulness_{rater}.csv").open("w", newline="") as f:
+        w = csv.writer(f); w.writerow(["Criteria", "Rating"])
+        for i in range(1, 6): w.writerow([f"U{i}", u_val(i)])
+
+
+def test_overall_layout_is_read_and_checked(pack):
+    lecture, out = pack
+    write_overall(out, "rater1", lambda i: 4, lambda i, q: 3, lambda i: 5)
+    key = json.loads((out / "KEY_DO_NOT_SHARE.json").read_text())
+    r = rating.read_ratings(out / "notes_rater1.csv", key)
+    assert r[("S01", "overall")] == 4 and len(r) == 3
+    assert rating.read_ratings(out / "questions_rater1.csv", key)[("S01", "Q2", "overall")] == 3
+    assert rating.read_ratings(out / "usefulness_rater1.csv")[("U3", "score")] == 5
+    assert rating.completeness(out / "notes_rater1.csv", key) == {"filled": 3, "total": 3, "missing": 0}
+    (out / "notes_rater1.csv").write_text("Set,Rating\nS01,6\n")
+    with pytest.raises(rating.ValidationError, match="outside 1-5"):
+        rating.read_ratings(out / "notes_rater1.csv", key)
+    (out / "notes_rater1.csv").write_text("Set,Rating\nS99,3\n")
+    with pytest.raises(rating.ValidationError, match="unknown set"):
+        rating.read_ratings(out / "notes_rater1.csv", key)
+
+
+def test_report_with_overall_scores_does_not_invent_criteria_or_shares(pack):
+    lecture, out = pack
+    write_overall(out, "rater1", lambda i: 3 + i % 3, lambda i, q: 3 + (i + q) % 3, lambda i: 4)
+    write_overall(out, "rater2", lambda i: 4, lambda i, q: 4, lambda i: 5)
+    text = report.build(lecture.parent, ["L1"], out)
+    assert "one overall score per set" in text and "Table 11b - Question quality shares: NOT COMPUTED" in text
+    assert "Table 12" in text and "Weighted kappa (notes)" in text
+    assert "| Config | overall |" in text                       # no criterion columns were invented
+    assert "Notes: accuracy" not in text and "Notes: overall" in text
+    assert "not computed under the confirmed rule" in text and "judged on the mean alone" in text
+    row4 = next(l for l in text.splitlines() if l.startswith("| 4 Technical"))
+    assert "metrics missing: 1" in row4 and "Largely achieved" in row4        # one planned metric is missing -> Largely
+    svg = report.figure_note_ratings_svg(out)
+    assert svg.startswith("<svg") and "overall score" in svg
+    assert report.outcome_questions_mean_only(4.17) == report.ACHIEVED
+    assert report.outcome_questions(4.17, None) == report.NOT_COMPUTED
