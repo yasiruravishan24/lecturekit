@@ -109,6 +109,9 @@ def test_cli_exit_codes(tmp_path, monkeypatch):
 
 def test_filter_diff_and_licence_variant(lecture):
     # make a C result: filter finds segment 2 (homework) only; labels say segments 2 and 5
+    # (the filter is scored inside meta ref_start-ref_end only, so let the window cover the labels at 26-30 s)
+    meta = json.loads((lecture / "meta.json").read_text()); meta["ref_end"] = 36
+    (lecture / "meta.json").write_text(json.dumps(meta))
     (lecture / "out").mkdir()
     (lecture / "out" / "C.json").write_text(json.dumps({"off_topic_ids": [2, 3]}))
     rows = evaluate.filter_diff(lecture)

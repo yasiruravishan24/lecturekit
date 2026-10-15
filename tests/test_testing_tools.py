@@ -112,3 +112,19 @@ def test_eval_reports_what_is_missing_and_still_errors_on_unknown_lecture(lectur
     assert main(["eval", "L1"]) == 0
     assert "NOT COMPUTED, missing: ref_transcript.txt" in capsys.readouterr().out
     assert main(["eval", "NOPE"]) == 2
+
+
+def test_filter_is_scored_only_inside_the_labelled_window(lecture):
+    """Segments outside ref_start-ref_end have no labels, so a filter hit there is not a false positive."""
+    for c in "ABC":
+        pipeline.run(lecture, c, FakeLLM(), 3)
+    meta = json.loads((lecture / "meta.json").read_text())
+    meta["ref_end"] = 12                                  # labelled window: the first three segments (0-14 s)
+    (lecture / "meta.json").write_text(json.dumps(meta))
+    (lecture / "off_topic_spans.json").write_text(json.dumps([[10, 14]]))
+    res = json.loads((lecture / "out" / "C.json").read_text())
+    res["off_topic_ids"] = [2, 5]                         # 2 is inside the window and gold; 5 (joke, 26 s) is outside
+    (lecture / "out" / "C.json").write_text(json.dumps(res))
+    r = evaluate.filter_prf(lecture)
+    assert r["segments"] == 3 and r["tp"] == 1 and r["fp"] == 0 and r["fn"] == 0
+    assert all(row["id"] != 5 for row in evaluate.filter_diff(lecture))

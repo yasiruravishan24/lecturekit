@@ -94,7 +94,9 @@ def slide_accuracy(ldir: Path) -> float:
 def _gold_pred(ldir: Path, drop_before: float | None = None):
     spans = json.loads((ldir / "off_topic_spans.json").read_text())
     pred = set(json.loads((ldir / "out" / "C.json").read_text())["off_topic_ids"])
-    segs = clip_segments(ldir)
+    a, b = ref_window(ldir)                            # the labelled window only (decision 5, CHANGELOG.md):
+    segs = [g for g in clip_segments(ldir)             # the gold spans exist only there, so nothing outside
+            if a <= (g["start"] + g["end"]) / 2 <= b]  # it can be judged right or wrong
     if drop_before is not None:                        # e.g. ignore the OCW licence notice
         segs = [g for g in segs if (g["start"] + g["end"]) / 2 > drop_before]
     gold = {g["id"] for g in segs
@@ -103,7 +105,7 @@ def _gold_pred(ldir: Path, drop_before: float | None = None):
 
 
 def filter_prf(ldir: Path, drop_before: float | None = None) -> dict:
-    """Precision/recall/F1 of the off-topic filter on the clip's segments.
+    """Precision/recall/F1 of the off-topic filter on the segments of the reference window (meta ref_start-ref_end).
 
     off_topic_spans.json = researcher labels, a list of [start, end] seconds.
     drop_before: ignore segments whose midpoint is before this time (licence notice).
