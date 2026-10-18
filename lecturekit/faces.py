@@ -42,14 +42,21 @@ class FaceBlurrer:
             self._profile = cv2.CascadeClassifier(cv2.data.haarcascades + "haarcascade_profileface.xml")
             self.kind = "haar"
 
-    def detect(self, bgr: np.ndarray) -> list[Box]:
+    def rows(self, bgr: np.ndarray) -> np.ndarray:
+        """YuNet detections as rows [x, y, w, h, 10 landmark values, score] (empty with the Haar fallback)."""
+        if self._yunet is None:
+            return np.zeros((0, 15), dtype=np.float32)
         h, w = bgr.shape[:2]
+        if self._size != (w, h):
+            self._yunet.setInputSize((w, h))
+            self._size = (w, h)
+        _, faces = self._yunet.detect(bgr)
+        return np.zeros((0, 15), dtype=np.float32) if faces is None else faces
+
+    def detect(self, bgr: np.ndarray) -> list[Box]:
         if self._yunet is not None:
-            if self._size != (w, h):
-                self._yunet.setInputSize((w, h))
-                self._size = (w, h)
-            _, faces = self._yunet.detect(bgr)
-            return [] if faces is None else [(int(f[0]), int(f[1]), int(f[2]), int(f[3])) for f in faces]
+            return [(int(f[0]), int(f[1]), int(f[2]), int(f[3])) for f in self.rows(bgr)]
+        h, w = bgr.shape[:2]
         gray = self.cv2.equalizeHist(self.cv2.cvtColor(bgr, self.cv2.COLOR_BGR2GRAY))
         boxes = [tuple(map(int, b)) for b in self._front.detectMultiScale(gray, 1.1, 4, minSize=(24, 24))]
         boxes += [tuple(map(int, b)) for b in self._profile.detectMultiScale(gray, 1.1, 4, minSize=(24, 24))]
@@ -73,6 +80,70 @@ class FaceBlurrer:
         boxes = self.detect(bgr)
         self.blur(bgr, boxes)
         return len(boxes)
+
+
+SAME_PERSON = 0.363                          # cosine similarity above which SFace says "the same person" (OpenCV's own threshold)
+
+
+def _unit(v: np.ndarray) -> np.ndarray:
+    v = np.asarray(v, dtype=np.float32).flatten()
+    return v / (np.linalg.norm(v) or 1.0)
+
+
+def pick_presenter(seen: list[tuple[np.ndarray, float]], min_seen: int = 3) -> Optional[np.ndarray]:
+    """Who is the presenter? The person who is seen most, and biggest: faces are grouped by who they look like and the
+    group with the largest total face size wins. `seen` = [(face feature, face area as a share of the picture)].
+    Returns that person's average feature, or None when nobody was seen often enough to be sure."""
+    groups: list[dict] = []
+    for feat, area in seen:
+        f = _unit(feat)
+        best = max(groups, key=lambda g: float(f @ _unit(g["sum"])), default=None)
+        if best is not None and float(f @ _unit(best["sum"])) >= SAME_PERSON:
+            best["sum"] = best["sum"] + f
+            best["n"] += 1
+            best["weight"] += area
+        else:
+            groups.append({"sum": f.copy(), "n": 1, "weight": area})
+    groups = [g for g in groups if g["n"] >= min_seen]
+    return _unit(max(groups, key=lambda g: g["weight"])["sum"]) if groups else None
+
+
+def is_presenter(feat: np.ndarray, presenter: Optional[np.ndarray]) -> bool:
+    return presenter is not None and float(_unit(feat) @ presenter) >= SAME_PERSON
+
+
+class FaceIdentity:
+    """Tells whether two faces are the same person (OpenCV SFace). Without its model file `ok` is False and every face is blurred."""
+
+    def __init__(self, blurrer: "FaceBlurrer", model: Optional[Path] = None):
+        model = Path(model or config.FACE_RECOGNIZER)
+        self.ok = blurrer.kind == "yunet" and model.exists()
+        self._rec = _cv2().FaceRecognizerSF.create(str(model), "") if self.ok else None
+
+    def feature(self, bgr: np.ndarray, row: np.ndarray) -> np.ndarray:
+        return _unit(self._rec.feature(self._rec.alignCrop(bgr, row)))
+
+
+def find_presenter(src: Path, blurrer: "FaceBlurrer", identity: FaceIdentity, info: dict, samples: int = 300) -> Optional[np.ndarray]:
+    """A first quick look at the video: one small picture every few seconds, to learn the presenter's face."""
+    step = max(3.0, info["duration"] / samples)
+    w = min(640, info["width"]) // 2 * 2
+    h = round(info["height"] * w / info["width"] / 2) * 2
+    cmd = ["ffmpeg", "-nostdin", "-v", "error", "-i", str(src), "-an", "-vf", f"fps=1/{step},scale={w}:{h}", "-f", "rawvideo", "-pix_fmt", "bgr24", "-"]
+    seen: list[tuple[np.ndarray, float]] = []
+    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, preexec_fn=_nice)
+    try:
+        while True:
+            raw = proc.stdout.read(w * h * 3)
+            if len(raw) < w * h * 3:
+                break
+            frame = np.frombuffer(raw, dtype=np.uint8).reshape(h, w, 3).copy()
+            for row in blurrer.rows(frame):
+                seen.append((identity.feature(frame, row), float(row[2] * row[3]) / (w * h)))
+    finally:
+        proc.stdout.close()
+        proc.wait()
+    return pick_presenter(seen)
 
 
 def blur_image_file(src: Path, dst: Path, blurrer: Optional[FaceBlurrer] = None, quality: int = 88) -> int:
@@ -108,17 +179,32 @@ def _nice() -> None:
         pass
 
 
+def self_follow(box: Box, last: Optional[tuple[Box, int]], frame_no: int, hold: int) -> bool:
+    """The presenter was just here and this face is in nearly the same place: still the presenter (no need to look again)."""
+    if last is None or frame_no - last[1] > hold:
+        return False
+    (x, y, w, h), (lx, ly, lw, lh) = box, last[0]
+    return abs((x + w / 2) - (lx + lw / 2)) < lw * 0.5 and abs((y + h / 2) - (ly + lh / 2)) < lh * 0.5 and 0.6 < w / max(lw, 1) < 1.6
+
+
 def blur_video(src: Path, dst: Path, progress: Optional[Callable[[int], None]] = None, max_height: int = 720, fps: int = 25,
-               every: int = 4, hold: int = 12, blurrer: Optional[FaceBlurrer] = None) -> dict:
+               every: int = 4, hold: int = 12, blurrer: Optional[FaceBlurrer] = None, keep_presenter: bool = False) -> dict:
     """Re-encode a video to a web-friendly MP4 (H.264 + AAC, at most `max_height` high) with every face blurred.
 
     Faces are looked for on every `every`-th frame and the boxes are held for `hold` frames, so a face that
-    the detector misses for a moment stays covered. The sound is copied over. progress(percent) is called now and then."""
+    the detector misses for a moment stays covered. The sound is copied over. progress(percent) is called now and then.
+
+    keep_presenter: the person seen most and biggest in the video (the lecturer) is left unblurred; everybody else is blurred.
+    If that person cannot be found, or the recognition model is missing, every face is blurred."""
     src, dst = Path(src), Path(dst)
     info = _probe(src)
     h = min(max_height, info["height"]) // 2 * 2
     w = round(info["width"] * h / info["height"] / 2) * 2
     blurrer = blurrer or FaceBlurrer()
+    identity = FaceIdentity(blurrer) if keep_presenter else None
+    presenter = find_presenter(src, blurrer, identity, info) if identity is not None and identity.ok else None
+    if keep_presenter and presenter is None:
+        logger.info("replay %s: no presenter found (or no recognition model): every face is blurred", dst.name)
     frame_bytes = w * h * 3
     total = max(1, int(info["duration"] * fps))
     tmp = Path(tempfile.mkstemp(suffix=".mp4", dir=dst.parent)[1])
@@ -130,6 +216,7 @@ def blur_video(src: Path, dst: Path, progress: Optional[Callable[[int], None]] =
     t0 = time.time()
     faces_seen = frames = 0
     held: list[tuple[Box, int]] = []         # (box, frame number when it was last seen)
+    last_presenter: Optional[tuple[Box, int]] = None
     try:
         pd = subprocess.Popen(dec, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, preexec_fn=_nice)
         pe = subprocess.Popen(enc, stdin=subprocess.PIPE, stderr=err, preexec_fn=_nice)
@@ -140,7 +227,16 @@ def blur_video(src: Path, dst: Path, progress: Optional[Callable[[int], None]] =
                     break
                 frame = np.frombuffer(raw, dtype=np.uint8).reshape(h, w, 3).copy()
                 if frames % every == 0:
-                    found = blurrer.detect(frame)
+                    if presenter is not None:
+                        found = []
+                        for row in blurrer.rows(frame):
+                            box = (int(row[0]), int(row[1]), int(row[2]), int(row[3]))
+                            if self_follow(box, last_presenter, frames, hold) or is_presenter(identity.feature(frame, row), presenter):
+                                last_presenter = (box, frames)
+                            else:
+                                found.append(box)
+                    else:
+                        found = blurrer.detect(frame)
                     faces_seen += len(found)
                     held = [(b, n) for b, n in held if frames - n < hold] + [(b, frames) for b in found]
                 boxes = [b for b, n in held if frames - n < hold]
@@ -168,4 +264,4 @@ def blur_video(src: Path, dst: Path, progress: Optional[Callable[[int], None]] =
         progress(100)
     logger.info("replay %s: %d frames, %d face detections (%s) in %.0f s", dst.name, frames, faces_seen, blurrer.kind, time.time() - t0)
     return {"frames": frames, "faces_found": faces_seen, "detector": blurrer.kind, "seconds": round(time.time() - t0, 1),
-            "width": w, "height": h}
+            "width": w, "height": h, "presenter_kept": presenter is not None}

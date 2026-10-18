@@ -312,7 +312,7 @@ def _audio_replay(src: Path, dst: Path) -> None:
 def make_replay(src, dst_dir, name: str = "replay", on_progress: Optional[Callable[[int], None]] = None) -> dict:
     """A web-friendly copy for watching again, written to dst_dir/<name>.mp4 or .m4a.
 
-    Video: H.264 + AAC, at most 720 p, every face blurred. Audio (or a video file without a picture): a small AAC file.
+    Video: H.264 + AAC, at most 720 p, every face blurred except the presenter's. Audio (or a video file without a picture): a small AAC file.
     Returns {"kind": "video" | "audio", "file": "<name>.mp4" | "<name>.m4a", "bytes": int}."""
     src, dst_dir = Path(src), Path(dst_dir)
     if not src.exists():
@@ -329,5 +329,5 @@ def make_replay(src, dst_dir, name: str = "replay", on_progress: Optional[Callab
         _audio_replay(src, dst)
         return {"kind": "audio", "file": dst.name, "bytes": dst.stat().st_size}
     dst = dst_dir / f"{name}.mp4"
-    info = faces.blur_video(src, dst, progress=on_progress)
-    return {"kind": "video", "file": dst.name, "bytes": dst.stat().st_size, **{k: info[k] for k in ("faces_found", "detector", "seconds")}}
+    info = faces.blur_video(src, dst, progress=on_progress, keep_presenter=config.KEEP_PRESENTER)
+    return {"kind": "video", "file": dst.name, "bytes": dst.stat().st_size, **{k: info[k] for k in ("faces_found", "detector", "seconds", "presenter_kept")}}

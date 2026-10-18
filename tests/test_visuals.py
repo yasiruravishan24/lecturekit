@@ -268,3 +268,26 @@ def test_extra_questions_about_the_board_do_not_repeat_or_break(tmp_path):
     assert api.add_visual_questions(tmp_path, existing, n=3, llm=Writer()) == []                 # nothing seen: no question, no AI call
     with pytest.raises(Exception, match="visuals.json"):
         api.add_visual_questions(tmp_path / "nowhere", existing, llm=Writer())
+
+
+def _person(seed):
+    return np.random.RandomState(seed).randn(128).astype("float32")
+
+
+def test_the_presenter_is_the_person_seen_most_and_biggest():
+    lecturer, student = _person(1), _person(2)
+    near = lambda v, s: v + 0.05 * np.random.RandomState(s).randn(128).astype("float32")      # the same face a little different
+    seen = [(near(lecturer, i), 0.06) for i in range(20)] + [(near(student, i), 0.01) for i in range(25)]
+    presenter = faces.pick_presenter(seen)
+    assert faces.is_presenter(near(lecturer, 99), presenter)
+    assert not faces.is_presenter(near(student, 99), presenter)
+    assert not faces.is_presenter(_person(3), presenter)                       # a stranger is blurred
+    assert faces.pick_presenter(seen[:2]) is None                              # seen too rarely: nobody is kept clear
+    assert not faces.is_presenter(lecturer, None)                              # no presenter known: everyone is blurred
+
+
+def test_a_face_in_the_same_place_as_the_presenter_a_moment_ago_is_still_the_presenter():
+    assert faces.self_follow((100, 80, 50, 60), ((104, 82, 52, 60), 10), 14, 12)
+    assert not faces.self_follow((300, 80, 50, 60), ((104, 82, 52, 60), 10), 14, 12)       # somewhere else
+    assert not faces.self_follow((100, 80, 50, 60), ((104, 82, 52, 60), 10), 40, 12)       # too long ago
+    assert not faces.self_follow((100, 80, 50, 60), None, 14, 12)
