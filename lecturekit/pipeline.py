@@ -9,6 +9,7 @@ import time
 from pathlib import Path
 
 from . import align, generate, log, offtopic
+from . import config as settings          # the name `config` is a lecture configuration (A, B or C) in this file
 from .errors import MissingInputError, ValidationError
 from .llm import LLM
 
@@ -95,7 +96,7 @@ def run(ldir: Path, config: str, llm: LLM, n_questions: int = 10, progress=None)
     times["notes"] = round(time.time() - t, 2)
     _p("quiz", "writing quiz")
     t = time.time()
-    quiz = generate.make_quiz(llm, context, n_questions)
+    quiz = generate.make_quiz(llm, context, n_questions, code_blocks=settings.QUIZ_CODE_BLOCKS)
     times["quiz"] = round(time.time() - t, 2)
 
     asr_s = json.loads((ldir / "transcript.json").read_text()).get("seconds", 0)

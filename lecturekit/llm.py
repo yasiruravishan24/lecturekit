@@ -50,7 +50,7 @@ class LLM:
             if not os.getenv("ANTHROPIC_API_KEY"):
                 raise MissingInputError("ANTHROPIC_API_KEY is not set (add it to .env)")
             import anthropic
-            self._client = anthropic.Anthropic()    # reads ANTHROPIC_API_KEY
+            self._client = anthropic.Anthropic(timeout=300.0, max_retries=2)    # reads ANTHROPIC_API_KEY; a stalled call must not block the queue for ten minutes
         content = user
         if images:                              # pictures first (JPEG bytes), then the question
             import base64

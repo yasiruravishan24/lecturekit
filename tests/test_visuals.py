@@ -291,3 +291,19 @@ def test_a_face_in_the_same_place_as_the_presenter_a_moment_ago_is_still_the_pre
     assert not faces.self_follow((300, 80, 50, 60), ((104, 82, 52, 60), 10), 14, 12)       # somewhere else
     assert not faces.self_follow((100, 80, 50, 60), ((104, 82, 52, 60), 10), 40, 12)       # too long ago
     assert not faces.self_follow((100, 80, 50, 60), None, 14, 12)
+
+
+def test_quiz_prompt_asks_for_code_blocks_only_when_switched_on():
+    class Rec:
+        def __init__(self):
+            self.users = []
+
+        def complete_json(self, system, user, tag="", **kw):
+            self.users.append(user)
+            return {"questions": []}
+
+    rec = Rec()
+    generate.make_quiz(rec, "CTX", 5)                          # as evaluated: no change to the prompt
+    generate.make_quiz(rec, "CTX", 5, code_blocks=True)
+    assert rec.users[0] == "Write EXACTLY 5 questions (no more, no fewer).\n\nCTX"
+    assert "fenced block" in rec.users[1] and rec.users[1].endswith("CTX")

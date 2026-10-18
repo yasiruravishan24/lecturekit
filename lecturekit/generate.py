@@ -26,9 +26,16 @@ def make_notes(llm: LLM, context: str) -> dict:
     return llm.complete_json(NOTES_SYSTEM, context, tag="notes")
 
 
-def make_quiz(llm: LLM, context: str, n: int = 10) -> list[dict]:
+CODE_FORMAT = ("When a question or an option contains code, write the code inside a fenced block (```python ... ```) with real line "
+               "breaks and the original indentation, and keep the sentence that asks the question outside the block. Short code "
+               "inside a sentence goes in single backticks, like `x == y`.")
+
+
+def make_quiz(llm: LLM, context: str, n: int = 10, code_blocks: bool = False) -> list[dict]:
+    """code_blocks: ask for code in fenced blocks so a page can show it as code. Off keeps the prompt exactly as it was evaluated."""
+    extra = f"\n{CODE_FORMAT}" if code_blocks else ""
     reply = llm.complete_json(
-        QUIZ_SYSTEM, f"Write EXACTLY {n} questions (no more, no fewer).\n\n{context}", tag="quiz")
+        QUIZ_SYSTEM, f"Write EXACTLY {n} questions (no more, no fewer).{extra}\n\n{context}", tag="quiz")
     return reply.get("questions", [])[:n]
 
 
@@ -64,7 +71,7 @@ def make_visual_quiz(llm: LLM, visual_text: str, existing: list[str], n: int = 3
     """Up to n extra questions about the board and screen content that do not repeat the existing questions."""
     listing = "\n".join(f"- {q}" for q in existing) or "(none)"
     reply = llm.complete_json(VISUAL_QUIZ_SYSTEM, f"Write at most {n} questions.\n\nExisting questions:\n{listing}\n\n"
-                              f"Board and screen content:\n{visual_text}", tag="quiz_visuals")
+                              f"{CODE_FORMAT}\n\nBoard and screen content:\n{visual_text}", tag="quiz_visuals")
     seen, out = {q.strip().lower() for q in existing}, []
     for q in reply.get("questions", []):
         opts = q.get("options")

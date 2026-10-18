@@ -21,4 +21,5 @@ TEMPERATURE = 0.0          # requested; the SDK/model may refuse it (recorded as
 FACE_MODEL = Path(os.getenv("LK_FACE_MODEL", "/opt/models/face_detection_yunet_2023mar.onnx"))   # OpenCV YuNet; missing: Haar cascade
 FACE_RECOGNIZER = Path(os.getenv("LK_FACE_RECOGNIZER", "/opt/models/face_recognition_sface_2021dec.onnx"))   # OpenCV SFace: finds the presenter
 KEEP_PRESENTER = os.getenv("LK_KEEP_PRESENTER", "1") != "0"      # the presenter's face stays clear in the replay, all others are blurred
+QUIZ_CODE_BLOCKS = os.getenv("LK_QUIZ_CODE_BLOCKS", "0") == "1"       # ask for code in fenced blocks (the web page shows them as code); 0 = the prompt exactly as evaluated
 VISUAL_MAX_FRAMES = int(os.getenv("LK_VISUAL_MAX_FRAMES", "80"))                                   # most pictures sent to the AI per lecture
