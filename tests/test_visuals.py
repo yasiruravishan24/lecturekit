@@ -234,3 +234,37 @@ def test_more_writing_on_a_board_is_found_even_when_the_picture_barely_changes(t
                     "-map", "[v]", "-c:v", "libx264", "-pix_fmt", "yuv420p", str(tmp_path / "board.mp4")], check=True)
     frames = visuals.extract_keyframes(tmp_path / "board.mp4", tmp_path / "raw")
     assert len(frames) >= 2 and frames[-1]["t"] >= 20                         # the later picture was taken too
+
+
+def test_extra_questions_about_the_board_do_not_repeat_or_break(tmp_path):
+    (tmp_path / "out").mkdir()
+    existing = [{"question": "What is a string?", "options": list("abcd"), "answer_index": 0, "bloom_level": "remember", "explanation": "x"}]
+    (tmp_path / "out" / "A.json").write_text(json.dumps({"lecture": "x", "config": "A", "notes": {"title": "T", "full_notes": [], "short_notes": []}, "quiz": existing}))
+    (tmp_path / "visuals.json").write_text(json.dumps({"shots": [{"t": 48, "kind": "board", "text": "F = m * a", "description": "", "file": "shot_001.jpg"}]}))
+
+    class Writer:
+        model = "fake"
+        calls = []
+        asked = None
+
+        def complete_json(self, system, user, tag="", json_attempts=2, images=None):
+            Writer.asked = user
+            good = {"question": "What is F when m = 4 kg and a = 3 m/s^2?", "options": ["7 N", "12 N", "1 N", "0.75 N"], "answer_index": 1, "bloom_level": "apply", "explanation": "F = m * a"}
+            return {"questions": [good,
+                                  {**good, "question": "what is a string?"},                                     # repeats an existing question
+                                  {"question": "Broken", "options": ["only", "two"], "answer_index": 0},          # not four options
+                                  {**good, "question": "Bad index", "answer_index": 7},
+                                  {**good, "question": "Second good one", "bloom_level": "weird"},
+                                  {**good, "question": "Third good one"}, {**good, "question": "Fourth good one"}]}
+    new = api.add_visual_questions(tmp_path, existing, n=3, llm=Writer(), config_name="A")
+    assert [q["question"] for q in new] == ["What is F when m = 4 kg and a = 3 m/s^2?", "Second good one", "Third good one"]
+    assert all(q["source"] == "board" and len(q["options"]) == 4 for q in new) and new[1]["bloom_level"] == "understand"
+    assert "What is a string?" in Writer.asked and "F = m * a" in Writer.asked                  # it is told what exists, and what is on the board
+    saved = json.loads((tmp_path / "out" / "A.json").read_text())["quiz"]
+    assert len(saved) == 4 and saved[0] == existing[0]                                          # the old question is first and unchanged
+    assert "Second good one" in (tmp_path / "out" / "A.md").read_text()
+    assert api.add_visual_questions(tmp_path, existing, n=0, llm=Writer()) == []
+    (tmp_path / "visuals.json").write_text(json.dumps({"shots": []}))
+    assert api.add_visual_questions(tmp_path, existing, n=3, llm=Writer()) == []                 # nothing seen: no question, no AI call
+    with pytest.raises(Exception, match="visuals.json"):
+        api.add_visual_questions(tmp_path / "nowhere", existing, llm=Writer())

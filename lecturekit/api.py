@@ -274,6 +274,32 @@ def refine_notes_with_visuals(out_dir, notes: dict, final: bool = True, llm: Opt
     return new
 
 
+def add_visual_questions(out_dir, quiz: list, n: int = 3, final: bool = True, llm: Optional[LLM] = None,
+                         config_name: Optional[str] = None) -> list:
+    """Extra quiz questions about the board and screen content (needs visuals.json). Returns only the NEW questions, in the
+    same shape as the quiz, each with "source": "board"; the existing questions are not changed. Returns [] when nothing
+    useful was seen or n is 0."""
+    out_dir = Path(out_dir)
+    vfile = out_dir / "visuals.json"
+    if not vfile.exists():
+        raise MissingInputError(f"{vfile} not found: run extract_visuals first")
+    shots = json.loads(vfile.read_text()).get("shots", [])
+    if n <= 0 or not shots:
+        return []
+    _check_key(llm)
+    llm = llm or LLM(model=config.MODEL_FINAL if final else config.MODEL_DEV)
+    new = generate.make_visual_quiz(llm, visuals.visual_context(shots), [q["question"] for q in quiz], n)
+    new = [{**q, "source": "board"} for q in new]
+    cfg = (config_name or "").upper()
+    result_file = out_dir / "out" / f"{cfg}.json"
+    if new and cfg and result_file.exists():                    # keep the files on disk in step with the quiz
+        result = json.loads(result_file.read_text())
+        result["quiz"] = list(result.get("quiz", [])) + new
+        result_file.write_text(json.dumps(result, indent=1))
+        (out_dir / "out" / f"{cfg}.md").write_text(pipeline.render_markdown(result))
+    return new
+
+
 def _audio_replay(src: Path, dst: Path) -> None:
     import subprocess
     from .errors import ExternalToolError
