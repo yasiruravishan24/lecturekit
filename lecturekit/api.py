@@ -22,7 +22,7 @@ import time
 from pathlib import Path
 from typing import Callable, Optional
 
-from . import asr, chunks, config, log, pipeline, slidefiles, slides as slides_mod
+from . import asr, chunks, config, faces, generate, log, pipeline, slidefiles, slides as slides_mod, visuals
 from .errors import MissingInputError, ValidationError
 from .llm import LLM
 
@@ -231,3 +231,77 @@ def finish_chunked_session(session_dir, total_chunks: int, slides=None, config_n
     log.event("process_done", session=str(session_dir), config=cfg, seconds=round(time.time() - t0, 1),
               tokens_in=result["stats"]["tokens_in"], tokens_out=result["stats"]["tokens_out"])
     return result
+
+
+# ---- the picture side (optional; the notes and quiz above never wait for it) ------------------------------------
+def extract_visuals(video, out_dir, final: bool = True, llm: Optional[LLM] = None, max_frames: Optional[int] = None,
+                    on_progress: Optional[Callable[[str, int], None]] = None) -> dict:
+    """Pictures of the board and screen from a video: faces blurred, read by Claude, cropped screenshots saved.
+
+    Writes out_dir/shots/shot_NNN.jpg and out_dir/visuals.json. Returns
+    {"model", "frames_sampled", "faces_blurred", "detector", "seconds",
+     "shots": [{"t": seconds, "kind": "board|slide|screen", "text", "description", "file"}]}."""
+    video, out_dir = Path(video), Path(out_dir)
+    if not video.exists():
+        raise MissingInputError(f"recording not found: {video}")
+    _check_key(llm)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    llm = llm or LLM(model=config.MODEL_FINAL if final else config.MODEL_DEV)
+    return visuals.extract_visuals(video, out_dir, llm, max_frames=max_frames, progress=on_progress)
+
+
+def refine_notes_with_visuals(out_dir, notes: dict, final: bool = True, llm: Optional[LLM] = None,
+                              config_name: Optional[str] = None) -> dict:
+    """The notes with the board and screen content merged in (needs visuals.json from extract_visuals).
+    Returns the new notes, or the same notes when nothing useful was seen. The quiz is not changed."""
+    out_dir = Path(out_dir)
+    vfile = out_dir / "visuals.json"
+    if not vfile.exists():
+        raise MissingInputError(f"{vfile} not found: run extract_visuals first")
+    shots = json.loads(vfile.read_text()).get("shots", [])
+    if not shots:
+        return notes
+    _check_key(llm)
+    llm = llm or LLM(model=config.MODEL_FINAL if final else config.MODEL_DEV)
+    new = generate.refine_notes(llm, notes, visuals.visual_context(shots))
+    cfg = (config_name or "").upper()
+    result_file = out_dir / "out" / f"{cfg}.json"
+    if cfg and result_file.exists():                           # keep the files on disk in step with the notes
+        result = json.loads(result_file.read_text())
+        result["notes"] = new
+        result_file.write_text(json.dumps(result, indent=1))
+        (out_dir / "out" / f"{cfg}.md").write_text(pipeline.render_markdown(result))
+    return new
+
+
+def _audio_replay(src: Path, dst: Path) -> None:
+    import subprocess
+    from .errors import ExternalToolError
+    done = subprocess.run(["ffmpeg", "-nostdin", "-y", "-v", "error", "-i", str(src), "-vn", "-c:a", "aac", "-b:a", "96k", str(dst)],
+                          capture_output=True, text=True)
+    if done.returncode != 0:
+        raise ExternalToolError(f"ffmpeg could not make the audio replay: {done.stderr[-300:]}")
+
+
+def make_replay(src, dst_dir, name: str = "replay", on_progress: Optional[Callable[[int], None]] = None) -> dict:
+    """A web-friendly copy for watching again, written to dst_dir/<name>.mp4 or .m4a.
+
+    Video: H.264 + AAC, at most 720 p, every face blurred. Audio (or a video file without a picture): a small AAC file.
+    Returns {"kind": "video" | "audio", "file": "<name>.mp4" | "<name>.m4a", "bytes": int}."""
+    src, dst_dir = Path(src), Path(dst_dir)
+    if not src.exists():
+        raise MissingInputError(f"recording not found: {src}")
+    dst_dir.mkdir(parents=True, exist_ok=True)
+    has_picture = False
+    if src.suffix.lower() not in (".m4a", ".mp3", ".wav", ".aac", ".ogg"):
+        try:
+            has_picture = faces._probe(src)["height"] > 0
+        except Exception:
+            has_picture = False
+    if not has_picture:
+        dst = dst_dir / f"{name}.m4a"
+        _audio_replay(src, dst)
+        return {"kind": "audio", "file": dst.name, "bytes": dst.stat().st_size}
+    dst = dst_dir / f"{name}.mp4"
+    info = faces.blur_video(src, dst, progress=on_progress)
+    return {"kind": "video", "file": dst.name, "bytes": dst.stat().st_size, **{k: info[k] for k in ("faces_found", "detector", "seconds")}}

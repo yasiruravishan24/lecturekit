@@ -38,19 +38,27 @@ class LLM:
         self.temperature_set = None
 
     # -- internals ---------------------------------------------------------
-    def _key(self, system: str, user: str) -> str:
-        raw = json.dumps([self.model, config.TEMPERATURE, system, user])
-        return hashlib.sha256(raw.encode()).hexdigest()
+    def _key(self, system: str, user: str, images: list[bytes] | None = None) -> str:
+        parts = [self.model, config.TEMPERATURE, system, user]
+        if images:                              # text-only prompts keep the key they always had
+            parts.append(hashlib.sha256(b"".join(images)).hexdigest())
+        return hashlib.sha256(json.dumps(parts).encode()).hexdigest()
 
-    def _call_api(self, system: str, user: str) -> tuple[str, int, int]:
+    def _call_api(self, system: str, user: str, images: list[bytes] | None = None) -> tuple[str, int, int]:
         if self._client is None:
             import os
             if not os.getenv("ANTHROPIC_API_KEY"):
                 raise MissingInputError("ANTHROPIC_API_KEY is not set (add it to .env)")
             import anthropic
             self._client = anthropic.Anthropic()    # reads ANTHROPIC_API_KEY
+        content = user
+        if images:                              # pictures first (JPEG bytes), then the question
+            import base64
+            content = [{"type": "image", "source": {"type": "base64", "media_type": "image/jpeg",
+                                                    "data": base64.b64encode(img).decode()}} for img in images]
+            content.append({"type": "text", "text": user})
         kwargs = dict(model=self.model, max_tokens=self.max_tokens, system=system,
-                      messages=[{"role": "user", "content": user}])
+                      messages=[{"role": "user", "content": content}])
         try:                                   # fixed temperature where the SDK/model allows it
             msg = self._client.messages.create(temperature=config.TEMPERATURE, **kwargs)
             self.temperature_set = True
@@ -63,10 +71,10 @@ class LLM:
         text = "".join(b.text for b in msg.content if b.type == "text")
         return text, msg.usage.input_tokens, msg.usage.output_tokens
 
-    def _call_with_retry(self, system: str, user: str, tag: str, attempts: int = 3):
+    def _call_with_retry(self, system: str, user: str, tag: str, attempts: int = 3, images: list[bytes] | None = None):
         for i in range(attempts):
             try:
-                return self._call_api(system, user)
+                return self._call_api(system, user, images) if images else self._call_api(system, user)
             except (MissingInputError, LLMError):
                 raise
             except Exception as e:                       # SDK errors differ between versions
@@ -81,9 +89,10 @@ class LLM:
                 time.sleep(2 ** (i + 1))
 
     # -- public ------------------------------------------------------------
-    def complete_json(self, system: str, user: str, tag: str = "", json_attempts: int = 2) -> dict:
-        """Ask for a JSON reply. An invalid reply is dropped from the cache and asked for once more."""
-        key = self._key(system, user)
+    def complete_json(self, system: str, user: str, tag: str = "", json_attempts: int = 2,
+                      images: list[bytes] | None = None) -> dict:
+        """Ask for a JSON reply (optionally about pictures). An invalid reply is dropped from the cache and asked for once more."""
+        key = self._key(system, user, images)
         cache_file = config.CACHE_DIR / "llm" / f"{key}.json"
         for attempt in range(1, json_attempts + 1):
             t0 = time.time()
@@ -93,7 +102,7 @@ class LLM:
                 text, tin, tout = rec["text"], rec["in"], rec["out"]
                 cached = True
             else:
-                text, tin, tout = self._call_with_retry(system, user, tag)
+                text, tin, tout = self._call_with_retry(system, user, tag, images=images)
                 if self.use_cache:
                     cache_file.parent.mkdir(parents=True, exist_ok=True)
                     cache_file.write_text(json.dumps({"text": text, "in": tin, "out": tout}))

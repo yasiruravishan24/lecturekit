@@ -7,3 +7,5 @@ numpy>=1.26
 scikit-learn>=1.4
 jiwer>=3.0
 pytest>=8.0
+opencv-python-headless>=4.9,<5   # visual stage: face blur, frames
+pillow>=10.0                   # visual stage: crop and save pictures
