@@ -22,7 +22,7 @@ import time
 from pathlib import Path
 from typing import Callable, Optional
 
-from . import asr, chunks, config, faces, generate, log, pipeline, slidefiles, slides as slides_mod, visuals
+from . import asr, chunks, config, enrich, faces, generate, log, pipeline, slidefiles, slides as slides_mod, visuals
 from .errors import MissingInputError, ValidationError
 from .llm import LLM
 
@@ -102,6 +102,24 @@ def _run_pipeline(out_dir: Path, cfg: str, llm: Optional[LLM], n_questions: int,
                         progress=lambda stage, message="": prog(stage, message))
 
 
+def _review_new_quiz(out_dir: Path, cfg: str, run: dict, llm: Optional[LLM], final: bool) -> dict:
+    """A second look at a new quiz (only when LK_QUIZ_REVIEW=1): unclear questions are dropped, a wrong answer mark is corrected."""
+    if not config.QUIZ_REVIEW or not run.get("quiz"):
+        return run
+    llm = llm or LLM(model=config.MODEL_FINAL if final else config.MODEL_DEV)
+    quiz, changes = enrich.review_quiz(llm, enrich._notes_text(run["notes"]), run["quiz"])
+    if changes["dropped"] or changes["fixed"]:
+        run = {**run, "quiz": quiz, "stats": {**run["stats"], "quiz_review": {"dropped": len(changes["dropped"]), "fixed": len(changes["fixed"])}}}
+        result_file = out_dir / "out" / f"{cfg}.json"
+        if result_file.exists():                                  # keep the files on disk in step with the quiz
+            data = json.loads(result_file.read_text())
+            data["quiz"], data["stats"] = run["quiz"], run["stats"]
+            result_file.write_text(json.dumps(data, indent=1))
+            (out_dir / "out" / f"{cfg}.md").write_text(pipeline.render_markdown(data))
+        logger.info("quiz review: %d dropped, %d corrected", len(changes["dropped"]), len(changes["fixed"]))
+    return run
+
+
 def _result(out_dir: Path, cfg: str, run: dict) -> dict:
     return {"status": "done", "session_dir": str(out_dir), **{k: run[k] for k in
             ("config", "model", "notes", "quiz", "stats")},
@@ -153,6 +171,7 @@ def process_session(recording, out_dir, slides=None, config_name: Optional[str] 
             (out_dir / "meta.json").write_text(json.dumps(meta, indent=1))
 
         result = _run_pipeline(out_dir, cfg, llm, n_questions, final, reuse, prog)
+        result = _review_new_quiz(out_dir, cfg, result, llm, final)
     except Exception as e:
         log.event("process_failed", session=str(out_dir), config=cfg,
                   error=type(e).__name__, code=getattr(e, "code", "unexpected"), message=str(e)[:300])
@@ -220,6 +239,7 @@ def finish_chunked_session(session_dir, total_chunks: int, slides=None, config_n
         prog("transcribe", "merging chunk transcripts")
         chunks.merge(session_dir, total_chunks, chunk_seconds, overlap)
         run = _run_pipeline(session_dir, cfg, llm, n_questions, final, True, prog)
+        run = _review_new_quiz(session_dir, cfg, run, llm, final)
     except Exception as e:
         log.event("process_failed", session=str(session_dir), config=cfg,
                   error=type(e).__name__, code=getattr(e, "code", "unexpected"), message=str(e)[:300])
@@ -298,6 +318,38 @@ def add_visual_questions(out_dir, quiz: list, n: int = 3, final: bool = True, ll
         result_file.write_text(json.dumps(result, indent=1))
         (out_dir / "out" / f"{cfg}.md").write_text(pipeline.render_markdown(result))
     return new
+
+
+def go_deeper(out_dir, notes: dict, quiz: list, n_questions: int = 3, max_searches: int = 4, final: bool = True, llm: Optional[LLM] = None,
+              config_name: Optional[str] = None, on_progress: Optional[Callable[[str, int], None]] = None) -> dict:
+    """Beyond the lecture: per topic of the notes, missing background, an example, common mistakes, things to check and pages to read
+    (found with web search), plus up to n_questions extra quiz questions (each with "source": "extra", already checked).
+
+    Writes out_dir/deeper.json and returns {"model", "web", "seconds", "topics", "not_covered", "questions"}.
+    The notes and the old questions are not changed; the new questions are appended to out/<config>.json."""
+    out_dir = Path(out_dir)
+    if not notes.get("full_notes"):
+        raise ValidationError("there are no notes to go deeper on")
+    _check_key(llm)
+    p = on_progress or (lambda stage, pct: None)
+    t0 = time.time()
+    llm = llm or LLM(model=config.MODEL_FINAL if final else config.MODEL_DEV, max_tokens=12000)
+    result = enrich.deeper(llm, notes, max_searches, progress=p)
+    p("questions", 75)
+    questions = enrich.make_extra_quiz(llm, result, [q["question"] for q in quiz], n_questions)
+    p("save", 95)
+    data = {"model": llm.model, "seconds": round(time.time() - t0, 1), **result, "questions": questions}
+    out_dir.mkdir(parents=True, exist_ok=True)
+    (out_dir / "deeper.json").write_text(json.dumps(data, indent=1, ensure_ascii=False))
+    cfg = (config_name or "").upper()
+    result_file = out_dir / "out" / f"{cfg}.json"
+    if questions and cfg and result_file.exists():
+        saved = json.loads(result_file.read_text())
+        saved["quiz"] = list(saved.get("quiz", [])) + questions
+        result_file.write_text(json.dumps(saved, indent=1))
+        (out_dir / "out" / f"{cfg}.md").write_text(pipeline.render_markdown(saved))
+    p("done", 100)
+    return data
 
 
 def _audio_replay(src: Path, dst: Path) -> None:

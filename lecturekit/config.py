@@ -22,4 +22,5 @@ FACE_MODEL = Path(os.getenv("LK_FACE_MODEL", "/opt/models/face_detection_yunet_2
 FACE_RECOGNIZER = Path(os.getenv("LK_FACE_RECOGNIZER", "/opt/models/face_recognition_sface_2021dec.onnx"))   # OpenCV SFace: finds the presenter
 KEEP_PRESENTER = os.getenv("LK_KEEP_PRESENTER", "1") != "0"      # the presenter's face stays clear in the replay, all others are blurred
 QUIZ_CODE_BLOCKS = os.getenv("LK_QUIZ_CODE_BLOCKS", "0") == "1"       # ask for code in fenced blocks (the web page shows them as code); 0 = the prompt exactly as evaluated
+QUIZ_REVIEW = os.getenv("LK_QUIZ_REVIEW", "0") == "1"            # a second look at every new quiz (drops unclear questions); 0 = the quiz exactly as evaluated
 VISUAL_MAX_FRAMES = int(os.getenv("LK_VISUAL_MAX_FRAMES", "80"))                                   # most pictures sent to the AI per lecture

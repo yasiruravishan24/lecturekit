@@ -307,3 +307,135 @@ def test_quiz_prompt_asks_for_code_blocks_only_when_switched_on():
     generate.make_quiz(rec, "CTX", 5, code_blocks=True)
     assert rec.users[0] == "Write EXACTLY 5 questions (no more, no fewer).\n\nCTX"
     assert "fenced block" in rec.users[1] and rec.users[1].endswith("CTX")
+
+
+# ---- going beyond the lecture (enrich.py) ---------------------------------------------------------------------------------------
+
+from lecturekit import enrich
+from lecturekit.llm import WebSearchUnavailable
+
+NOTES = {"title": "T", "full_notes": [{"heading": "Loops", "summary": "s", "key_points": ["a"]}, {"heading": "Strings", "summary": "s2", "key_points": ["b"]}],
+         "short_notes": ["x"]}
+DEEP = {"topics": [
+    {"index": 1, "background": "bg", "example": "```python\nfor i in range(3): print(i)\n```", "mistakes": ["off by one", ""],
+     "check": [{"claim": "range stops at stop", "why": "it stops at stop - 1"}, {"claim": "", "why": "x"}],
+     "links": [{"title": "Docs", "url": "https://docs.python.org/3/tutorial/"}, {"title": "Made up", "url": "https://invented.example/page"}, {"title": "bad", "url": "javascript:alert(1)"}]},
+    {"index": 9, "background": "outside the notes"}],
+    "not_covered": [{"title": "recursion", "explanation": "A function calling itself.", "why": "Trees."}, "sorting", "", {"title": ""}]}
+
+
+class WebLLM:
+    model = "fake"
+
+    def __init__(self, fail_web=False, quiz=None, checks=None):
+        self.fail_web, self.quiz, self.checks, self.web_calls, self.calls = fail_web, quiz or [], checks or [], 0, []
+
+    def complete_json_web(self, system, user, tag="", max_searches=4):
+        self.web_calls += 1
+        if self.fail_web:
+            raise WebSearchUnavailable("no")
+        return DEEP, [{"url": "https://docs.python.org/3/tutorial/", "title": "The Python Tutorial"}]
+
+    def complete_json(self, system, user, tag="", **kw):
+        self.calls.append(tag)
+        if tag == "deeper_links":
+            return {"topics": [{"index": 1, "pages": [1, 7, "x"]}, {"index": 2, "pages": [1]}]}
+        if tag == "deeper":
+            assert "cannot search" in system
+            return DEEP
+        if tag == "quiz_extra":
+            return {"questions": self.quiz}
+        return {"checks": self.checks}
+
+
+GOOD_Q = {"question": "What does range(3) give?", "options": ["0 1 2", "1 2 3", "0 1 2 3", "3"], "answer_index": 0, "bloom_level": "apply", "explanation": "e"}
+
+
+def test_deeper_keeps_only_real_links_and_clean_text(monkeypatch):
+    monkeypatch.setattr(enrich, "_alive", lambda url, timeout=8.0: True)
+    r = enrich.deeper(WebLLM(), NOTES)
+    assert r["web"] is True and [t["index"] for t in r["topics"]] == [1]                  # topic 9 does not exist: dropped
+    t = r["topics"][0]
+    assert t["links"] == [{"title": "Docs", "url": "https://docs.python.org/3/tutorial/"}]         # an invented or unsafe link is dropped
+    assert t["mistakes"] == ["off by one"] and t["check"] == [{"claim": "range stops at stop", "why": "it stops at stop - 1"}]
+    assert "```python" in t["example"] and r["not_covered"] == [{"title": "recursion", "explanation": "A function calling itself.", "why": "Trees."}, {"title": "sorting", "explanation": "", "why": ""}]
+
+
+def test_deeper_without_web_search_still_works_and_has_no_links():
+    r = enrich.deeper(WebLLM(fail_web=True), NOTES)
+    assert r["web"] is False and r["topics"][0]["links"] == [] and r["topics"][0]["background"] == "bg"
+
+
+def test_review_drops_unclear_questions_fixes_marks_and_keeps_a_minimum():
+    quiz = [{**GOOD_Q, "question": f"Q{i}"} for i in range(1, 11)]
+    checks = [{"index": 1, "verdict": "bad", "reason": "two answers"}, {"index": 2, "verdict": "wrong_answer", "correct_index": 3, "reason": "r"},
+              {"index": 3, "verdict": "bad"}, {"index": 4, "verdict": "bad"}, {"index": 5, "verdict": "bad"}, {"index": 6, "verdict": "wrong_answer", "correct_index": 9}]
+    new, changes = enrich.apply_review(quiz, checks)
+    assert len(changes["dropped"]) == 3 and len(new) == 7                       # at most 30 % are dropped (3 of 10), the 4th "bad" stays
+    assert [q["question"] for q in new][:2] == ["Q2", "Q5"] or new[0]["question"] == "Q2"
+    assert next(q for q in new if q["question"] == "Q2")["answer_index"] == 3        # corrected
+    assert next(q for q in new if q["question"] == "Q6")["answer_index"] == 0        # an impossible correction is ignored
+    few, c2 = enrich.apply_review(quiz[:5], [{"index": i, "verdict": "bad"} for i in range(1, 6)])
+    assert len(few) == 5 and c2["dropped"] == []                                  # never below 5 questions
+
+
+def test_a_failing_review_leaves_the_quiz_alone():
+    class Broken(WebLLM):
+        def complete_json(self, *a, **k):
+            raise RuntimeError("down")
+    quiz = [GOOD_Q]
+    assert enrich.review_quiz(Broken(), "m", quiz) == (quiz, {"dropped": [], "fixed": []})
+
+
+def test_go_deeper_writes_the_file_and_extra_questions(tmp_path, monkeypatch):
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "x")
+    (tmp_path / "out").mkdir()
+    (tmp_path / "out" / "A.json").write_text(json.dumps({"lecture": "L", "notes": NOTES, "quiz": [{"question": "old", "options": ["a", "b", "c", "d"], "answer_index": 0}]}))
+    llm = WebLLM(quiz=[GOOD_Q, {**GOOD_Q, "question": "old"}, {"question": "broken"}], checks=[{"index": 1, "verdict": "ok"}])
+    out = api.go_deeper(tmp_path, NOTES, [{"question": "old"}], n_questions=3, llm=llm, config_name="A")
+    assert [q["question"] for q in out["questions"]] == ["What does range(3) give?"] and out["questions"][0]["source"] == "extra"
+    assert json.loads((tmp_path / "deeper.json").read_text())["web"] is True
+    assert [q["question"] for q in json.loads((tmp_path / "out" / "A.json").read_text())["quiz"]] == ["old", "What does range(3) give?"]
+    with pytest.raises(Exception):
+        api.go_deeper(tmp_path, {"full_notes": []}, [], llm=llm)
+
+
+def test_when_claude_leaves_the_links_out_it_is_asked_to_pick_from_the_pages_it_found(monkeypatch):
+    monkeypatch.setattr(enrich, "_alive", lambda url, timeout=8.0: True)
+    class Silent(WebLLM):
+        def complete_json_web(self, system, user, tag="", max_searches=4):
+            reply = json.loads(json.dumps(DEEP))
+            reply["topics"][0]["links"] = []
+            return reply, [{"url": "https://docs.python.org/3/tutorial/", "title": "The Python Tutorial"}]
+    r = enrich.deeper(Silent(), NOTES)
+    assert r["topics"][0]["links"] == [{"title": "The Python Tutorial", "url": "https://docs.python.org/3/tutorial/"}]       # page 7 does not exist: ignored
+
+
+def test_links_that_do_not_open_are_removed(monkeypatch):
+    monkeypatch.setattr(enrich, "_alive", lambda url, timeout=8.0: False)
+    assert enrich.deeper(WebLLM(), NOTES)["topics"][0]["links"] == []
+    topics = [{"links": [{"title": "a", "url": "https://x.example/a"}, {"title": "b", "url": "https://x.example/b"}]}]
+    monkeypatch.setattr(enrich, "_alive", lambda url, timeout=8.0: url.endswith("/a"))
+    enrich._only_working(topics)
+    assert topics[0]["links"] == [{"title": "a", "url": "https://x.example/a"}]
+
+
+def test_what_counts_as_a_working_page(monkeypatch):
+    import io
+    import urllib.error
+
+    def fake(code):
+        def opener(req, timeout=0):
+            if isinstance(code, int) and code >= 400:
+                raise urllib.error.HTTPError(req.full_url, code, "x", {}, io.BytesIO(b""))
+            if code == "down":
+                raise OSError("no host")
+            class R:
+                status = 200
+                def __enter__(self): return self
+                def __exit__(self, *a): return False
+            return R()
+        return opener
+    for code, expected in ((200, True), (404, False), (410, False), (500, False), (403, True), (429, True), ("down", False)):
+        monkeypatch.setattr(enrich.urllib.request, "urlopen", fake(code))
+        assert enrich._alive("https://x.example/") is expected, code
