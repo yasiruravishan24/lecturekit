@@ -98,7 +98,8 @@ def deeper(llm: LLM, notes: dict, max_searches: int = 4, progress: Optional[Call
                 links.append({"title": _clean(link.get("title")) or urlparse(url).netloc, "url": url})
         checks = [{"claim": _clean(c.get("claim")), "why": _clean(c.get("why"))} for c in t.get("check", [])
                   if isinstance(c, dict) and _clean(c.get("claim")) and _clean(c.get("why"))]
-        topics.append({"index": t["index"], "background": t.get("background", "").strip() if isinstance(t.get("background"), str) else "",
+        topics.append({"index": t["index"], "heading": str(notes["full_notes"][t["index"] - 1].get("heading", "")),
+                       "background": t.get("background", "").strip() if isinstance(t.get("background"), str) else "",
                        "example": t.get("example", "").strip() if isinstance(t.get("example"), str) else "",
                        "mistakes": [_clean(m) for m in t.get("mistakes", []) if _clean(m)][:4], "check": checks[:4], "links": links[:3]})
     topics.sort(key=lambda t: t["index"])
