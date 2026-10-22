@@ -165,7 +165,8 @@ def process_session(recording, out_dir, slides=None, config_name: Optional[str] 
         if reuse and tfile.exists():
             logger.info("reusing %s", tfile)
         else:
-            res = asr.transcribe(media, tfile, whisper_size, 0.0, None)
+            res = asr.transcribe(media, tfile, whisper_size, 0.0, None,
+                                 on_segment=lambda done, total: prog("transcribe", f"{int(100 * done / max(total, 1))}% of the audio"))
             meta = json.loads((out_dir / "meta.json").read_text())
             meta["clip_end"] = res["audio_seconds"]
             (out_dir / "meta.json").write_text(json.dumps(meta, indent=1))

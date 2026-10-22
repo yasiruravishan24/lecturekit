@@ -41,6 +41,22 @@ def test_chunk_start():
     assert chunks.chunk_start(3, 300, 5) == 895
 
 
+def test_a_segment_is_reported_as_soon_as_it_is_made_and_the_caller_can_stop_it(tmp_path, fake_whisper):
+    f = fake_chunk(tmp_path, "b", 10)
+    seen = []
+    asr.transcribe(f, tmp_path / "o.json", None, 0.0, None, on_segment=lambda done, total: seen.append((done, total)))
+    assert seen == [(3, 10), (6, 10), (9, 10), (10, 10)]                  # one report per segment, the last one at the end of the audio
+
+    class Stop(BaseException):
+        pass
+
+    def stop_at_once(done, total):
+        raise Stop()
+    with pytest.raises(Stop):                                                # raising from the report stops the transcription
+        asr.transcribe(f, tmp_path / "o2.json", None, 0.0, None, on_segment=stop_at_once)
+    assert not (tmp_path / "o2.json").exists()                               # and nothing half-made is saved
+
+
 def test_time_offset_shifts_segments(tmp_path, fake_whisper):
     f = fake_chunk(tmp_path, "a", 7)
     res = asr.transcribe(f, tmp_path / "o.json", None, 0.0, None, time_offset=100)

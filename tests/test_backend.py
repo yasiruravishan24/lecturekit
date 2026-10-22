@@ -17,7 +17,7 @@ def session_inputs(tmp_path, lecture, monkeypatch):
     rec.write_bytes(b"fake")
     pdf = tmp_path / "in" / "s.pdf"; pdf.write_bytes(b"%PDF fake")
 
-    def fake_transcribe(media, out, size=None, start=0.0, end=None):
+    def fake_transcribe(media, out, size=None, start=0.0, end=None, **kw):
         data = json.loads((lecture / "transcript.json").read_text())
         data["audio_seconds"] = 36.0
         out.write_text(json.dumps(data))

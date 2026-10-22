@@ -51,11 +51,14 @@ def get_model(size: str | None = None):
 
 
 def transcribe(media: Path, out: Path, model_size: str | None = None,
-               start: float = 0.0, end: float | None = None, time_offset: float = 0.0) -> dict:
+               start: float = 0.0, end: float | None = None, time_offset: float = 0.0, on_segment=None) -> dict:
     """Transcribe media[start:end]; segment times are lecture time = file time + start + time_offset.
 
     `start` cuts the file (the clip begins there). `time_offset` is for a chunk file whose own
     time 0 is lecture second X: decode from 0 and add X to every segment time.
+
+    `on_segment(done_seconds, total_seconds)` is called after every segment: a long lecture then reports its progress all the time, and the
+    caller can stop the work by raising from it (the server's Cancel does).
     """
     size = model_size or config.WHISPER_SIZE
     logger.info("decoding audio %s [%s-%s]", Path(media).name, start, end)
@@ -65,8 +68,12 @@ def transcribe(media: Path, out: Path, model_size: str | None = None,
     t0 = time.time()
     shift = start + time_offset
     segs, _ = model.transcribe(audio, language="en", vad_filter=True, beam_size=5)
-    segments = [{"id": i, "start": round(s.start + shift, 2), "end": round(s.end + shift, 2),
-                 "text": s.text.strip()} for i, s in enumerate(segs)]
+    total = len(audio) / SR
+    segments = []
+    for i, s in enumerate(segs):
+        segments.append({"id": i, "start": round(s.start + shift, 2), "end": round(s.end + shift, 2), "text": s.text.strip()})
+        if on_segment:
+            on_segment(min(s.end, total), total)
     result = {"model": f"whisper-{size}", "seconds": round(time.time() - t0, 1),
               "audio_seconds": round(len(audio) / SR, 1), "segments": segments}
     out.write_text(json.dumps(result, indent=1))
